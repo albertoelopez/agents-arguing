@@ -1,0 +1,75 @@
+[project]
+name = "agents-arguing"
+version = "0.1.0"
+description = "AI agents debating each other with voice and video output"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pipecat-ai>=0.0.43",
+    "autogen-agentchat>=0.4",
+    "faster-whisper>=1.0.0",
+    "TTS>=0.22.0",
+    "moviepy>=1.0.3",
+    "numpy>=1.24.0",
+    "torch>=2.0.0",
+    "torchaudio>=2.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "aiofiles>=23.0.0",
+    "httpx>=0.25.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
+    "typer>=0.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0.0",
+    "playwright>=1.40.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+web = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "websockets>=12.0",
+    "gradio>=4.0.0",
+    "python-multipart>=0.0.6",
+    "sse-starlette>=2.0.0",
+]
+echomimic = [
+    "diffusers>=0.27.0",
+    "accelerate>=0.27.0",
+    "transformers>=4.38.0",
+    "safetensors>=0.4.0",
+    "opencv-python>=4.9.0",
+    "mediapipe>=0.10.0",
+]
+pipecat = [
+    "pipecat-ai[silero,daily,websocket]>=0.0.43",
+    "daily-python>=0.10.0",
+]
+
+[project.scripts]
+debate = "src.cli:app"
+debate-server = "src.web.server:main"
+debate-ui = "src.web.gradio_app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --cov=src --cov-report=term-missing"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true

@@ -1,0 +1,35 @@
+debate:
+  topic: "AI will benefit humanity more than harm it"
+  rounds: 3
+  time_per_turn_seconds: 60
+
+agents:
+  pro:
+    name: "Alex"
+    role: "Advocate"
+    personality: "Optimistic, data-driven, focuses on technological progress"
+    avatar: "assets/avatars/agent_pro.png"
+    voice_sample: "assets/audio/voice_pro.wav"
+
+  con:
+    name: "Jordan"
+    role: "Skeptic"
+    personality: "Cautious, philosophical, emphasizes ethical concerns"
+    avatar: "assets/avatars/agent_con.png"
+    voice_sample: "assets/audio/voice_con.wav"
+
+moderator:
+  name: "Morgan"
+  avatar: "assets/avatars/moderator.png"
+  voice_sample: "assets/audio/voice_mod.wav"
+  intro_script: "Welcome to today's debate on: {topic}"
+
+video:
+  resolution: [1280, 720]
+  fps: 25
+  format: "mp4"
+  codec: "libx264"
+
+audio:
+  sample_rate: 22050
+  channels: 1
