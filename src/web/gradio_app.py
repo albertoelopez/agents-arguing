@@ -153,12 +153,13 @@ async def generate_video_for_debate(
         segment_path = output_dir / f"segment_{debate_id}_{i:03d}.mp4"
 
         if use_echomimic:
-            from src.video.echomimic_wrapper import EchoMimicPipeline
-            pipeline = EchoMimicPipeline()
+            from src.video.echomimic_wrapper import EchoMimicV3Pipeline
+            pipeline = EchoMimicV3Pipeline()
             await pipeline.generate_video(
                 image_path=avatar,
                 audio_path=audio_path,
                 output_path=segment_path,
+                prompt=f"{turn.speaker} speaking naturally about a debate topic.",
             )
         else:
             create_video_from_image_audio(
