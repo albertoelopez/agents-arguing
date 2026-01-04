@@ -1,4 +1,6 @@
 import asyncio
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Generator
 
@@ -8,6 +10,91 @@ from src.agents.debate_manager_simple import SimpleDebateManager, DebateTurn
 from src.agents.debater_simple import DebaterConfig
 from src.realtime.streaming import StreamingDebateSession
 from src.config import settings
+
+DEBATE_TURNS_STORE: dict[str, list[DebateTurn]] = {}
+
+
+async def synthesize_audio_edge_tts(text: str, voice: str, output_path: Path) -> Path:
+    try:
+        import edge_tts
+        communicate = edge_tts.Communicate(text, voice)
+        await communicate.save(str(output_path))
+        return output_path
+    except ImportError:
+        raise ImportError("Install edge-tts: pip install edge-tts")
+
+
+async def generate_debate_audio(
+    turns: list[DebateTurn],
+    pro_voice: str = "en-US-GuyNeural",
+    con_voice: str = "en-US-JennyNeural",
+    moderator_voice: str = "en-US-AriaNeural",
+) -> list[Path]:
+    audio_files = []
+    output_dir = settings.output_dir / "audio"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for i, turn in enumerate(turns):
+        if turn.stance == "pro":
+            voice = pro_voice
+        elif turn.stance == "con":
+            voice = con_voice
+        else:
+            voice = moderator_voice
+
+        audio_path = output_dir / f"turn_{i:03d}_{turn.speaker}.mp3"
+        await synthesize_audio_edge_tts(turn.content, voice, audio_path)
+        audio_files.append(audio_path)
+
+    return audio_files
+
+
+def combine_audio_files(audio_files: list[Path], output_path: Path) -> Path:
+    from pydub import AudioSegment
+
+    combined = AudioSegment.empty()
+    pause = AudioSegment.silent(duration=500)
+
+    for audio_file in audio_files:
+        segment = AudioSegment.from_mp3(str(audio_file))
+        combined += segment + pause
+
+    combined.export(str(output_path), format="mp3")
+    return output_path
+
+
+async def generate_video_for_debate(
+    turns: list[DebateTurn],
+    pro_avatar: Path | None,
+    con_avatar: Path | None,
+    audio_files: list[Path],
+) -> Path:
+    from src.video.composer import VideoComposer
+
+    output_dir = settings.output_dir / "video"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    composer = VideoComposer()
+
+    segments = []
+    for i, (turn, audio_path) in enumerate(zip(turns, audio_files)):
+        if turn.stance == "pro" and pro_avatar:
+            avatar = pro_avatar
+        elif turn.stance == "con" and con_avatar:
+            avatar = con_avatar
+        else:
+            avatar = None
+
+        segments.append({
+            "turn": turn,
+            "audio": audio_path,
+            "avatar": avatar,
+        })
+
+    output_path = output_dir / f"debate_{uuid.uuid4().hex[:8]}.mp4"
+    await composer.compose_debate_video(segments, output_path)
+
+    return output_path
 
 
 CSS = """
@@ -51,7 +138,8 @@ async def run_debate_async(
     llm_provider: str = "groq",
     llm_model: str = "llama-3.3-70b-versatile",
     progress=gr.Progress(),
-) -> Generator[str, None, None]:
+) -> Generator[tuple[str, str], None, None]:
+    debate_id = uuid.uuid4().hex[:8]
 
     pro_config = DebaterConfig(
         name=pro_name,
@@ -79,23 +167,28 @@ async def run_debate_async(
     <p style="color: #aaa; margin-top: 10px;">{pro_name} (PRO) vs {con_name} (CON) • {num_rounds} rounds</p>
 </div>
 """
-    yield output_html
+    yield output_html, debate_id
 
     turn_count = 0
     total_turns = 2 + (num_rounds * 2) + 2 + 1
+    collected_turns = []
 
     async for turn in manager.run_debate_stream():
         output_html += format_turn(turn)
         turn_count += 1
+        collected_turns.append(turn)
         progress(turn_count / total_turns, desc=f"{turn.speaker} speaking...")
-        yield output_html
+        yield output_html, debate_id
 
-    output_html += """
+    DEBATE_TURNS_STORE[debate_id] = collected_turns
+
+    output_html += f"""
 <div style="text-align: center; padding: 20px; margin-top: 20px; background: #1a1a2e; border-radius: 12px;">
     <h3 style="color: #4CAF50;">✅ Debate Complete</h3>
+    <p style="color: #aaa;">Debate ID: {debate_id} • Click "Generate Audio" to create audio version</p>
 </div>
 """
-    yield output_html
+    yield output_html, debate_id
 
 
 def run_debate_sync(
@@ -114,21 +207,51 @@ def run_debate_sync(
 
     async def collect():
         result = ""
-        async for html in run_debate_async(
+        debate_id = ""
+        async for html, d_id in run_debate_async(
             topic, pro_name, pro_personality,
             con_name, con_personality, num_rounds, llm_provider, llm_model, progress
         ):
             result = html
-            yield result
+            debate_id = d_id
+            yield result, debate_id
 
     gen = collect()
 
     while True:
         try:
-            result = loop.run_until_complete(gen.__anext__())
-            yield result
+            result, debate_id = loop.run_until_complete(gen.__anext__())
+            yield result, debate_id
         except StopAsyncIteration:
             break
+
+
+def generate_audio_sync(debate_id: str, pro_voice: str, con_voice: str, progress=gr.Progress()):
+    if not debate_id or debate_id not in DEBATE_TURNS_STORE:
+        return None, "No debate found. Run a debate first."
+
+    turns = DEBATE_TURNS_STORE[debate_id]
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        progress(0.1, desc="Generating audio for debate turns...")
+        audio_files = loop.run_until_complete(
+            generate_debate_audio(turns, pro_voice, con_voice)
+        )
+
+        progress(0.9, desc="Combining audio files...")
+        output_dir = settings.output_dir / "audio"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        combined_path = output_dir / f"debate_{debate_id}_full.mp3"
+        combine_audio_files(audio_files, combined_path)
+
+        progress(1.0, desc="Done!")
+        return str(combined_path), f"Audio generated: {len(turns)} segments combined"
+
+    except Exception as e:
+        return None, f"Error generating audio: {str(e)}"
 
 
 def create_app() -> gr.Blocks:
@@ -236,6 +359,37 @@ def create_app() -> gr.Blocks:
                     label="Debate",
                 )
 
+                debate_id_state = gr.State(value="")
+
+                gr.Markdown("### 🎙️ Audio Generation")
+                with gr.Row():
+                    pro_voice = gr.Dropdown(
+                        label="Pro Voice",
+                        choices=[
+                            "en-US-GuyNeural",
+                            "en-US-ChristopherNeural",
+                            "en-US-EricNeural",
+                            "en-GB-RyanNeural",
+                        ],
+                        value="en-US-GuyNeural",
+                    )
+                    con_voice = gr.Dropdown(
+                        label="Con Voice",
+                        choices=[
+                            "en-US-JennyNeural",
+                            "en-US-AriaNeural",
+                            "en-US-SaraNeural",
+                            "en-GB-SoniaNeural",
+                        ],
+                        value="en-US-JennyNeural",
+                    )
+
+                with gr.Row():
+                    generate_audio_btn = gr.Button("🔊 Generate Audio", variant="secondary")
+
+                audio_status = gr.Textbox(label="Status", interactive=False)
+                audio_output = gr.Audio(label="Debate Audio", type="filepath")
+
         start_btn.click(
             fn=run_debate_sync,
             inputs=[
@@ -248,18 +402,25 @@ def create_app() -> gr.Blocks:
                 llm_provider,
                 llm_model,
             ],
-            outputs=debate_output,
+            outputs=[debate_output, debate_id_state],
+        )
+
+        generate_audio_btn.click(
+            fn=generate_audio_sync,
+            inputs=[debate_id_state, pro_voice, con_voice],
+            outputs=[audio_output, audio_status],
         )
 
         gr.Markdown("""
 ---
 ### How it works
 1. **Set your topic** - Any debatable subject
-2. **Select your LLM** - Choose from your local Ollama models
+2. **Select your LLM** - Choose Groq (cloud) or Ollama (local)
 3. **Customize debaters** - Give them names and personalities
 4. **Watch the debate** - AI agents argue back and forth in real-time
+5. **Generate Audio** - Convert the debate to speech with different voices
 
-Built with Ollama + Pipecat 🚀
+Built with Groq/Ollama + Edge-TTS
         """)
 
     return app
