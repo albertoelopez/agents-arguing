@@ -63,38 +63,142 @@ def combine_audio_files(audio_files: list[Path], output_path: Path) -> Path:
     return output_path
 
 
-async def generate_video_for_debate(
-    turns: list[DebateTurn],
-    pro_avatar: Path | None,
-    con_avatar: Path | None,
-    audio_files: list[Path],
+def create_video_from_image_audio(
+    image_path: Path,
+    audio_path: Path,
+    output_path: Path,
+    speaker_name: str,
+    stance: str,
 ) -> Path:
-    from src.video.composer import VideoComposer
+    from moviepy.editor import ImageClip, AudioFileClip, CompositeVideoClip, TextClip, ColorClip
+
+    audio = AudioFileClip(str(audio_path))
+    duration = audio.duration
+
+    img_clip = ImageClip(str(image_path)).set_duration(duration)
+    img_clip = img_clip.resize(height=400)
+
+    bg = ColorClip(size=(800, 600), color=(30, 30, 40), duration=duration)
+
+    img_clip = img_clip.set_position(("center", 80))
+
+    name_color = "#4CAF50" if stance == "pro" else "#f44336"
+    name_label = TextClip(
+        speaker_name,
+        fontsize=36,
+        color=name_color,
+        font="DejaVu-Sans-Bold",
+    ).set_position(("center", 500)).set_duration(duration)
+
+    stance_label = TextClip(
+        stance.upper(),
+        fontsize=24,
+        color=name_color,
+        font="DejaVu-Sans",
+    ).set_position(("center", 540)).set_duration(duration)
+
+    video = CompositeVideoClip([bg, img_clip, name_label, stance_label])
+    video = video.set_audio(audio)
+
+    video.write_videofile(
+        str(output_path),
+        fps=24,
+        codec="libx264",
+        audio_codec="aac",
+        verbose=False,
+        logger=None,
+    )
+
+    video.close()
+    audio.close()
+
+    return output_path
+
+
+async def generate_video_for_debate(
+    debate_id: str,
+    pro_avatar_path: str | None,
+    con_avatar_path: str | None,
+    use_echomimic: bool = False,
+    progress_callback=None,
+) -> Path:
+    from moviepy.editor import concatenate_videoclips, VideoFileClip
+
+    if debate_id not in DEBATE_TURNS_STORE:
+        raise ValueError("Debate not found")
+
+    turns = DEBATE_TURNS_STORE[debate_id]
 
     output_dir = settings.output_dir / "video"
     output_dir.mkdir(parents=True, exist_ok=True)
+    audio_dir = settings.output_dir / "audio"
 
-    composer = VideoComposer()
+    video_segments = []
 
-    segments = []
-    for i, (turn, audio_path) in enumerate(zip(turns, audio_files)):
-        if turn.stance == "pro" and pro_avatar:
-            avatar = pro_avatar
-        elif turn.stance == "con" and con_avatar:
-            avatar = con_avatar
+    for i, turn in enumerate(turns):
+        audio_path = audio_dir / f"turn_{i:03d}_{turn.speaker}.mp3"
+
+        if not audio_path.exists():
+            continue
+
+        if turn.stance == "pro" and pro_avatar_path:
+            avatar = Path(pro_avatar_path)
+        elif turn.stance == "con" and con_avatar_path:
+            avatar = Path(con_avatar_path)
         else:
-            avatar = None
+            continue
 
-        segments.append({
-            "turn": turn,
-            "audio": audio_path,
-            "avatar": avatar,
-        })
+        if not avatar.exists():
+            continue
 
-    output_path = output_dir / f"debate_{uuid.uuid4().hex[:8]}.mp4"
-    await composer.compose_debate_video(segments, output_path)
+        segment_path = output_dir / f"segment_{debate_id}_{i:03d}.mp4"
 
-    return output_path
+        if use_echomimic:
+            from src.video.echomimic_wrapper import EchoMimicPipeline
+            pipeline = EchoMimicPipeline()
+            await pipeline.generate_video(
+                image_path=avatar,
+                audio_path=audio_path,
+                output_path=segment_path,
+            )
+        else:
+            create_video_from_image_audio(
+                image_path=avatar,
+                audio_path=audio_path,
+                output_path=segment_path,
+                speaker_name=turn.speaker,
+                stance=turn.stance,
+            )
+
+        video_segments.append(segment_path)
+
+        if progress_callback:
+            progress_callback((i + 1) / len(turns), f"Processing turn {i + 1}/{len(turns)}")
+
+    if not video_segments:
+        raise ValueError("No video segments generated")
+
+    clips = [VideoFileClip(str(p)) for p in video_segments]
+    final = concatenate_videoclips(clips, method="compose")
+
+    final_path = output_dir / f"debate_{debate_id}_final.mp4"
+    final.write_videofile(
+        str(final_path),
+        fps=24,
+        codec="libx264",
+        audio_codec="aac",
+        verbose=False,
+        logger=None,
+    )
+
+    for clip in clips:
+        clip.close()
+    final.close()
+
+    for seg in video_segments:
+        seg.unlink(missing_ok=True)
+
+    return final_path
 
 
 CSS = """
@@ -254,6 +358,51 @@ def generate_audio_sync(debate_id: str, pro_voice: str, con_voice: str, progress
         return None, f"Error generating audio: {str(e)}"
 
 
+def generate_video_sync(
+    debate_id: str,
+    pro_avatar,
+    con_avatar,
+    use_echomimic: bool,
+    progress=gr.Progress(),
+):
+    if not debate_id or debate_id not in DEBATE_TURNS_STORE:
+        return None, "No debate found. Run a debate first."
+
+    audio_dir = settings.output_dir / "audio"
+    if not any(audio_dir.glob(f"turn_*_{DEBATE_TURNS_STORE[debate_id][0].speaker}.mp3")):
+        return None, "Generate audio first before creating video."
+
+    if not pro_avatar and not con_avatar:
+        return None, "Upload at least one avatar image."
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        progress(0.1, desc="Generating video segments...")
+
+        def progress_cb(pct, msg):
+            progress(0.1 + pct * 0.8, desc=msg)
+
+        video_path = loop.run_until_complete(
+            generate_video_for_debate(
+                debate_id=debate_id,
+                pro_avatar_path=pro_avatar,
+                con_avatar_path=con_avatar,
+                use_echomimic=use_echomimic,
+                progress_callback=progress_cb,
+            )
+        )
+
+        progress(1.0, desc="Done!")
+        return str(video_path), f"Video generated: {video_path.name}"
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return None, f"Error generating video: {str(e)}"
+
+
 def create_app() -> gr.Blocks:
     with gr.Blocks(
         title="Agents Arguing",
@@ -336,6 +485,11 @@ def create_app() -> gr.Blocks:
                         value="Optimistic, data-driven, focuses on technological progress and innovation",
                         lines=2,
                     )
+                    pro_avatar = gr.Image(
+                        label="Avatar Image (for video)",
+                        type="filepath",
+                        height=150,
+                    )
 
                 gr.Markdown("### 🔴 Con Debater")
                 with gr.Group():
@@ -344,6 +498,11 @@ def create_app() -> gr.Blocks:
                         label="Personality",
                         value="Skeptical, philosophical, emphasizes ethical concerns and potential risks",
                         lines=2,
+                    )
+                    con_avatar = gr.Image(
+                        label="Avatar Image (for video)",
+                        type="filepath",
+                        height=150,
                     )
 
                 start_btn = gr.Button("🎬 Start Debate", variant="primary", size="lg")
@@ -390,6 +549,19 @@ def create_app() -> gr.Blocks:
                 audio_status = gr.Textbox(label="Status", interactive=False)
                 audio_output = gr.Audio(label="Debate Audio", type="filepath")
 
+                gr.Markdown("### 🎬 Video Generation")
+                with gr.Row():
+                    use_echomimic = gr.Checkbox(
+                        label="Use EchoMimicV3 (lip-sync, requires GPU)",
+                        value=False,
+                    )
+
+                with gr.Row():
+                    generate_video_btn = gr.Button("🎥 Generate Video", variant="secondary")
+
+                video_status = gr.Textbox(label="Video Status", interactive=False)
+                video_output = gr.Video(label="Debate Video")
+
         start_btn.click(
             fn=run_debate_sync,
             inputs=[
@@ -411,16 +583,24 @@ def create_app() -> gr.Blocks:
             outputs=[audio_output, audio_status],
         )
 
+        generate_video_btn.click(
+            fn=generate_video_sync,
+            inputs=[debate_id_state, pro_avatar, con_avatar, use_echomimic],
+            outputs=[video_output, video_status],
+        )
+
         gr.Markdown("""
 ---
 ### How it works
 1. **Set your topic** - Any debatable subject
-2. **Select your LLM** - Choose Groq (cloud) or Ollama (local)
-3. **Customize debaters** - Give them names and personalities
-4. **Watch the debate** - AI agents argue back and forth in real-time
-5. **Generate Audio** - Convert the debate to speech with different voices
+2. **Upload avatars** - Images for each debater (for video)
+3. **Select your LLM** - Choose Groq (cloud) or Ollama (local)
+4. **Customize debaters** - Give them names and personalities
+5. **Watch the debate** - AI agents argue back and forth in real-time
+6. **Generate Audio** - Convert the debate to speech with different voices
+7. **Generate Video** - Create a video with avatars speaking the debate
 
-Built with Groq/Ollama + Edge-TTS
+Built with Groq/Ollama + Edge-TTS + MoviePy
         """)
 
     return app
