@@ -70,42 +70,41 @@ def create_video_from_image_audio(
     speaker_name: str,
     stance: str,
 ) -> Path:
-    from moviepy.editor import ImageClip, AudioFileClip, CompositeVideoClip, TextClip, ColorClip
+    from moviepy import ImageClip, AudioFileClip, CompositeVideoClip, TextClip, ColorClip
 
     audio = AudioFileClip(str(audio_path))
     duration = audio.duration
 
-    img_clip = ImageClip(str(image_path)).set_duration(duration)
-    img_clip = img_clip.resize(height=400)
+    img_clip = ImageClip(str(image_path)).with_duration(duration)
+    img_clip = img_clip.resized(height=400)
 
     bg = ColorClip(size=(800, 600), color=(30, 30, 40), duration=duration)
 
-    img_clip = img_clip.set_position(("center", 80))
+    img_clip = img_clip.with_position(("center", 80))
 
     name_color = "#4CAF50" if stance == "pro" else "#f44336"
     name_label = TextClip(
-        speaker_name,
-        fontsize=36,
+        text=speaker_name,
+        font_size=36,
         color=name_color,
         font="DejaVu-Sans-Bold",
-    ).set_position(("center", 500)).set_duration(duration)
+    ).with_position(("center", 500)).with_duration(duration)
 
     stance_label = TextClip(
-        stance.upper(),
-        fontsize=24,
+        text=stance.upper(),
+        font_size=24,
         color=name_color,
         font="DejaVu-Sans",
-    ).set_position(("center", 540)).set_duration(duration)
+    ).with_position(("center", 540)).with_duration(duration)
 
     video = CompositeVideoClip([bg, img_clip, name_label, stance_label])
-    video = video.set_audio(audio)
+    video = video.with_audio(audio)
 
     video.write_videofile(
         str(output_path),
         fps=24,
         codec="libx264",
         audio_codec="aac",
-        verbose=False,
         logger=None,
     )
 
@@ -122,7 +121,7 @@ async def generate_video_for_debate(
     use_echomimic: bool = False,
     progress_callback=None,
 ) -> Path:
-    from moviepy.editor import concatenate_videoclips, VideoFileClip
+    from moviepy import concatenate_videoclips, VideoFileClip
 
     if debate_id not in DEBATE_TURNS_STORE:
         raise ValueError("Debate not found")

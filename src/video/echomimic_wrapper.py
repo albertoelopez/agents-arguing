@@ -156,7 +156,7 @@ class EchoMimicPipeline:
         audio_path: Path,
     ) -> None:
         import cv2
-        from moviepy.editor import VideoFileClip, AudioFileClip
+        from moviepy import VideoFileClip, AudioFileClip
 
         temp_video = output_path.with_suffix(".temp.mp4")
 
@@ -170,7 +170,7 @@ class EchoMimicPipeline:
 
         video = VideoFileClip(str(temp_video))
         audio = AudioFileClip(str(audio_path))
-        final = video.set_audio(audio)
+        final = video.with_audio(audio)
         final.write_videofile(str(output_path), codec="libx264", audio_codec="aac")
 
         temp_video.unlink()
